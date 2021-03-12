@@ -13,4 +13,4 @@ DQN属于Value Iteration方法，采用的是回归模型，所以loss是L2Loss�
 $\epsilon -greedy$方法，而且初始训练阶段$\epsilon$比较大，随着训练时间增加$\epsilon$逐渐降低。如此初期随机程度比较大，一段时间后才完全依赖模型
 
 ## 实验结果
-![TRAIN_DQN](DQN_TRAIN.jpg)
+![TRAIN_DQN](./DQN_TRAIN.jpg)

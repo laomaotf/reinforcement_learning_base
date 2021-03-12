@@ -14,15 +14,17 @@ plt.ion()
 
 CONFIG = {
 
-    "POOL_SIZE": 3096, #应该比较大，保存较多样本
-    "BASE_LR": 0.005, #学习率 10e-3左右
+    "POOL_SIZE": 1024, #应该比较大，保存较多样本
+    "BASE_LR": 0.001, #学习率 10e-3左右,不易过大
     "LAMBDA_Q1": 0.9, #表示未来可期的收益，不易太小
     "COPY_EVERY_TRAINING": 1, #训练n次后，复制一次网络
-    "BATCH_EACH_EPOCH":64,
+    "TEST_EVERY_TRAINING": 10, #训练n次后，测试一次网络
+    "BATCH_EACH_EPOCH_MAX":256, #不易超过steps in one epochs
     "PLAYING_EACH_EPOCH": 8, #每一轮进行若干轮游戏，收集样本
     "REWARD_NEG":-10, #失败时的惩罚，这个值很重要
     "BALANCED_SAMPLING":False,
-    "LOSS":"HuberLoss"
+    "LOSS":"HuberLoss",
+    "TARGET_UPDATE_TAU": 0.2 #target模型更新权重，减小可以提高训练稳定性，加速收敛
 }
 
 class SAMPLE_POOL:
@@ -87,12 +89,15 @@ class MODEL(mx.gluon.Block):
         return self.model(x)
 
     def copy_from(self, other):
+        tau = CONFIG["TARGET_UPDATE_TAU"]
         params = other.collect_params()
         params_self = self.collect_params()
         for name,param in params.items():
             key = name.replace(params.prefix,"")
             selfname = params_self.prefix + key
-            params_self[selfname].set_data(param.data())
+            #params_self[selfname].set_data(param.data())
+            new_data = params_self[selfname].data() * (1 - tau) + tau * param.data()
+            params_self[selfname].set_data(new_data)
         return
 
 
@@ -110,14 +115,14 @@ def PredictAction(net,S):
 
 
 def Train_QLearning(nets, opt, pool):
-    batchs_total = CONFIG['BATCH_EACH_EPOCH']
+    batchs_total = min([CONFIG['BATCH_EACH_EPOCH_MAX'],pool.len()])
     batch_size = 1
     if CONFIG["LOSS"] == "L2Loss":
         calc_q_loss = mx.gluon.loss.L2Loss()  # using regression loss!!!
     elif CONFIG["LOSS"] == "HuberLoss":
         calc_q_loss = mx.gluon.loss.HuberLoss()
-    net = nets['now']
-    net_target = nets['last']
+    net = nets["qnet"]
+    net_target = nets["target"]
     for _ in range(batchs_total):
         batch_data = pool.get_one_batch(batch_size)
         S0 = [d[0] for d in batch_data]
@@ -181,7 +186,7 @@ def play_one_round(env, model, sample_pool, prob_to_explore, show_wnd = False):
     return sum_reward
 
 
-def play_games(epochs_total = 500):
+def play_games(epochs_total = 1000):
     env = gym.make("CartPole-v0")
     np.random.seed(10)
 
@@ -217,17 +222,17 @@ def play_games(epochs_total = 500):
 
 
     models = {
-        "now": MODEL(),
-        "last": MODEL()
+        "qnet": MODEL(),
+        "target": MODEL()
     }
     #避免mxnet的延迟初始化
     for key in models.keys():
         models[key].initialize()
         input_one = mx.nd.ones((1, 4))
         models[key](input_one)
-    models['last'].copy_from(models['now'])
+    models["target"].copy_from(models["qnet"])
 
-    trainer = mx.gluon.Trainer(models['now'].collect_params(),
+    trainer = mx.gluon.Trainer(models["qnet"].collect_params(),
                                "adam",
                                {"learning_rate": CONFIG['BASE_LR']})
 
@@ -247,23 +252,26 @@ def play_games(epochs_total = 500):
 
 
         #set explore rate. exploring at first 50 epochs
-        explore_rate = 1 - float(epoch) / 100.0
-        explore_rate = max([0,explore_rate])
+        explore_rate = 1 - float(epoch) / 50.0
+        explore_rate = max([0.05,explore_rate])
         explore_rates.append(explore_rate)
         #PLAY AND TRAINING
+        #sample_pool.reset()
         for batch_num in range(CONFIG['PLAYING_EACH_EPOCH']):
-            play_one_round(env, models["now"],sample_pool, explore_rate)
+            play_one_round(env, models["qnet"],sample_pool, explore_rate)
             sample_pool.begin_sampling()
-            models['now'] = Train_QLearning(models, trainer, sample_pool)
+            models["qnet"] = Train_QLearning(models, trainer, sample_pool)
             sample_pool.end_sampling()
+            #print(sample_pool.stat_action())
 
-        if epoch % CONFIG['COPY_EVERY_TRAINING'] == 0:
-            #UPDATE MODEL OF LAST
-            models['last'].copy_from(models['now'])
+        # UPDATE TARGET MODEL
+        models["target"].copy_from(models["qnet"])
+
+        if test_rewards == [] or epoch % CONFIG['TEST_EVERY_TRAINING'] == 0:
             #TESTING NEW MODEL
             rewards = 0
             for _ in range(100):
-                rewards += play_one_round(env, models["last"], None,0,show_wnd=True)
+                rewards += play_one_round(env, models["target"], None,0,show_wnd=True)
             test_rewards.append(rewards /100.0)
         else:
             test_rewards.append(test_rewards[-1]) #copy reward from last epoch if not testing
